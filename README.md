@@ -28,7 +28,7 @@ history rewriting tools](contrib/filter-repo-demos).
     * [Solving this with filter-repo](#solving-this-with-filter-repo)
     * [Solving this with BFG Repo Cleaner](#solving-this-with-bfg-repo-cleaner)
     * [Solving this with filter-branch](#solving-this-with-filter-branch)
-    * [Solving this with fast-export/fast-import](#solving-this-with-fast-exportfast-import)
+    * [Solving this with fast-export/fast-import](#solving-this-with-fast-exportfast-import)7
   * [Design rationale behind filter-repo](#design-rationale-behind-filter-repo)
   * [How do I contribute?](#how-do-i-contribute)
   * [Is there a Code of Conduct?](#is-there-a-code-of-conduct)
