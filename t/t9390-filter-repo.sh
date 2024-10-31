@@ -21,6 +21,7 @@ filter_testcase() {
 		# Clean up from previous run
 		git pack-refs --all &&
 		rm .git/packed-refs &&
+		rm -rf .git/filter-repo/ &&
 
 		# Run the example
 		cat $DATA/$INPUT | git filter-repo --stdin --quiet --force --replace-refs delete-no-add "${REST[@]}" &&
@@ -442,7 +443,7 @@ test_expect_success FUNNYNAMES 'refs/replace/ to skip a parent' '
 		git tag -d v2.0 &&
 		git replace HEAD~1 HEAD~2 &&
 
-		git filter-repo --replace-refs delete-no-add --path "" --force &&
+		git filter-repo --proceed &&
 		test $(git rev-list --count HEAD) = 2 &&
 		git cat-file --batch-check --batch-all-objects >all-objs &&
 		test_line_count = 16 all-objs &&
@@ -466,14 +467,22 @@ test_expect_success FUNNYNAMES 'refs/replace/ to add more initial history' '
 		git add numbers/small &&
 		git clean -fd &&
 		git commit -m new.root &&
-
-		git replace --graft master~2 new_root &&
+		NEW_ROOT=$(git rev-parse HEAD) &&
 		git checkout master &&
+
+		# Make it look like a fresh clone...
+		git gc &&
+		git reflog expire --expire=now HEAD &&
+		git branch -D new_root &&
+
+		# ...but add a replace object to give us a new root commit
+		git replace --graft master~2 $NEW_ROOT &&
 
 		git --no-replace-objects cat-file -p master~2 >grandparent &&
 		! grep parent grandparent &&
+		rm grandparent &&
 
-		git filter-repo --replace-refs delete-no-add --path "" --force &&
+		git filter-repo --proceed &&
 
 		git --no-replace-objects cat-file -p master~2 >new-grandparent &&
 		grep parent new-grandparent &&
@@ -544,6 +553,21 @@ test_expect_success FUNNYNAMES 'creation/deletion/updating of replace refs' '
 		echo "$(git rev-parse master~1) refs/replace/$master_1" >>out &&
 		echo "$(git rev-parse master~1) refs/replace/$master_2" >>out &&
 		sort -k 2 out >expect &&
+		git show-ref | grep refs/replace/ >output &&
+		test_cmp output expect &&
+
+		rsync -a --delete ../replace_handling/ ./ &&
+		git filter-repo --replace-refs old-default --path-rename numbers:counting &&
+		echo "$(git rev-parse master) refs/replace/$master" >>out &&
+		echo "$(git rev-parse master~1) refs/replace/$master_1" >>out &&
+		echo "$(git rev-parse master~1) refs/replace/$master_2" >>out &&
+		sort -k 2 out >expect &&
+		git show-ref | grep refs/replace/ >output &&
+		test_cmp output expect &&
+
+		rsync -a --delete ../replace_handling/ ./ &&
+		git filter-repo --replace-refs update-no-add --path-rename numbers:counting &&
+		echo "$(git rev-parse master~1) refs/replace/$master_1" >expect &&
 		git show-ref | grep refs/replace/ >output &&
 		test_cmp output expect
 	)
@@ -734,6 +758,16 @@ test_expect_success C_LOCALE_OUTPUT '--analyze' '
 	(
 		cd analyze_me &&
 
+		# Detect whether zlib or zlib-ng are in use; they give
+		# slightly different compression
+		echo e80fdf8cd5fb645649c14f41656a076dedc4e12a >expect &&
+		python -c "print(\"test\\t\" * 1000, end=\"\")" | git hash-object -w --stdin >actual &&
+		test_cmp expect actual &&
+		compressed_size=$(python -c "import os; print(os.path.getsize(\".git/objects/e8/0fdf8cd5fb645649c14f41656a076dedc4e12a\"))") &&
+		zlibng=$((72-${compressed_size})) &&
+		test $zlibng -eq "0" -o $zlibng -eq "2" &&
+
+		# Now do the analysis
 		git filter-repo --analyze &&
 
 		# It should not work again without a --force
@@ -762,16 +796,16 @@ test_expect_success C_LOCALE_OUTPUT '--analyze' '
 		  Number of file extensions: 2
 
 		  Total unpacked size (bytes): 206
-		  Total packed size (bytes): 387
+		  Total packed size (bytes): $((387+${zlibng}))
 
 		EOF
 		head -n 9 README >actual &&
 		test_cmp expect actual &&
 
-		cat >expect <<-\EOF &&
+		cat >expect <<-EOF &&
 		=== Files by sha and associated pathnames in reverse size ===
 		Format: sha, unpacked size, packed size, filename(s) object stored as
-		  a89c82a2d4b713a125a4323d25adda062cc0013d         44         48 numbers/medium.num
+		  a89c82a2d4b713a125a4323d25adda062cc0013d         44         $((48+${zlibng})) numbers/medium.num
 		  c58ae2ffaf8352bd9860bf4bbb6ea78238dca846         35         41 fickle
 		  ccff62141ec7bae42e01a3dcb7615b38aa9fa5b3         24         40 fickle
 		  f00c965d8307308469e537302baa73048488f162         21         37 numbers/small.num
@@ -786,8 +820,8 @@ test_expect_success C_LOCALE_OUTPUT '--analyze' '
 		cat >expect <<-EOF &&
 		=== All directories by reverse size ===
 		Format: unpacked size, packed size, date deleted, directory name
-		         206        387 <present>  <toplevel>
-		          65         85 2005-04-07 numbers
+		         206        $((387+${zlibng})) <present>  <toplevel>
+		          65         $((85+${zlibng})) 2005-04-07 numbers
 		          13         58 <present>  words
 		          10         40 <present>  sequence
 		EOF
@@ -796,7 +830,7 @@ test_expect_success C_LOCALE_OUTPUT '--analyze' '
 		cat >expect <<-EOF &&
 		=== Deleted directories by reverse size ===
 		Format: unpacked size, packed size, date deleted, directory name
-		          65         85 2005-04-07 numbers
+		          65         $((85+${zlibng})) 2005-04-07 numbers
 		EOF
 		test_cmp expect directories-deleted-sizes.txt &&
 
@@ -804,14 +838,14 @@ test_expect_success C_LOCALE_OUTPUT '--analyze' '
 		=== All extensions by reverse size ===
 		Format: unpacked size, packed size, date deleted, extension name
 		         141        302 <present>  <no extension>
-		          65         85 2005-04-07 .num
+		          65         $((85+${zlibng})) 2005-04-07 .num
 		EOF
 		test_cmp expect extensions-all-sizes.txt &&
 
 		cat >expect <<-EOF &&
 		=== Deleted extensions by reverse size ===
 		Format: unpacked size, packed size, date deleted, extension name
-		          65         85 2005-04-07 .num
+		          65         $((85+${zlibng})) 2005-04-07 .num
 		EOF
 		test_cmp expect extensions-deleted-sizes.txt &&
 
@@ -819,7 +853,7 @@ test_expect_success C_LOCALE_OUTPUT '--analyze' '
 		=== All paths by reverse accumulated size ===
 		Format: unpacked size, packed size, date deleted, path name
 		          72        110 <present>  fickle
-		          44         48 2005-04-07 numbers/medium.num
+		          44         $((48+${zlibng})) 2005-04-07 numbers/medium.num
 		           8         38 <present>  words/know
 		          21         37 2005-04-07 numbers/small.num
 		          20         36 <present>  whatever
@@ -834,7 +868,7 @@ test_expect_success C_LOCALE_OUTPUT '--analyze' '
 		cat >expect <<-EOF &&
 		=== Deleted paths by reverse accumulated size ===
 		Format: unpacked size, packed size, date deleted, path name(s)
-		          44         48 2005-04-07 numbers/medium.num
+		          44         $((48+${zlibng})) 2005-04-07 numbers/medium.num
 		          21         37 2005-04-07 numbers/small.num
 		EOF
 		test_cmp expect path-deleted-sizes.txt
@@ -1239,59 +1273,62 @@ test_expect_success 'startup sanity checks' '
 		cd startup_sanity_checks &&
 
 		echo foobar | git hash-object -w --stdin &&
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "expected freshly packed repo" err &&
+		git count-objects -v &&
+		test_must_fail git filter-repo --path numbers 2>../err &&
+		test_i18ngrep "expected freshly packed repo" ../err &&
 		git prune &&
 
 		git remote add another_remote /dev/null &&
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "expected one remote, origin" err &&
+		test_must_fail git filter-repo --path numbers 2>../err &&
+		test_i18ngrep "expected one remote, origin" ../err &&
 		git remote rm another_remote &&
 
 		git remote rename origin another_remote &&
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "expected one remote, origin" err &&
+		test_must_fail git filter-repo --path numbers 2>../err &&
+		test_i18ngrep "expected one remote, origin" ../err &&
 		git remote rename another_remote origin &&
 
 		cd words &&
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "GIT_DIR must be .git" err &&
-		rm err &&
+		test_must_fail git filter-repo --path numbers 2>../../err &&
+		test_i18ngrep "GIT_DIR must be .git" ../../err &&
+		rm ../../err &&
 		cd .. &&
 
 		git config core.bare true &&
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "GIT_DIR must be ." err &&
+		test_must_fail git filter-repo --path numbers 2>../err &&
+		test_i18ngrep "GIT_DIR must be ." ../err &&
 		git config core.bare false &&
 
 		git update-ref -m "Just Testing" refs/heads/master HEAD &&
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "expected at most one entry in the reflog" err &&
+		test_must_fail git filter-repo --path numbers 2>../err &&
+		test_i18ngrep "expected at most one entry in the reflog" ../err &&
 		git reflog expire --expire=now &&
 
 		echo yes >>words/know &&
 		git stash save random change &&
 		rm -rf .git/logs/ &&
 		git gc &&
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "has stashed changes" err &&
+		test_must_fail git filter-repo --path numbers 2>../err &&
+		test_i18ngrep "has stashed changes" ../err &&
 		git update-ref -d refs/stash &&
 
 		echo yes >>words/know &&
 		git add words/know &&
 		git gc --prune=now &&
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "you have uncommitted changes" err &&
+		test_must_fail git filter-repo --path numbers 2>../err &&
+		test_i18ngrep "you have uncommitted changes" ../err &&
 		git checkout HEAD words/know &&
 
 		echo yes >>words/know &&
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "you have unstaged changes" err &&
+		test_must_fail git filter-repo --path numbers 2>../err &&
+		test_i18ngrep "you have unstaged changes" ../err &&
 		git checkout -- words/know &&
 
-		test_must_fail git filter-repo --path numbers 2>err &&
-		test_i18ngrep "you have untracked changes" err &&
-		rm err &&
+		>untracked &&
+		test_must_fail git filter-repo --path numbers 2>../err &&
+		test_i18ngrep "you have untracked changes" ../err &&
+		rm ../err &&
+		rm untracked &&
 
 		git worktree add ../other-worktree HEAD &&
 		test_must_fail git filter-repo --path numbers 2>../err &&
@@ -1321,7 +1358,27 @@ test_expect_success 'startup sanity checks' '
 		test_must_fail git filter-repo --path numbers 2>../err &&
 		test_i18ngrep "expected freshly packed repo" ../err &&
 		test_i18ngrep "when cloning local repositories" ../err &&
-		rm ../err
+		rm ../err &&
+
+		cd ../startup_sanity_checks &&
+		git config core.ignoreCase true &&
+		rev=$(git rev-parse refs/remotes/origin/other) &&
+		echo "$rev refs/remotes/origin/zcase" >>.git/packed-refs &&
+		echo "$rev refs/remotes/origin/zCASE" >>.git/packed-refs &&
+		test_must_fail git filter-repo --path numbers 2>../err
+		test_i18ngrep "Cannot rewrite history on a case insensitive" ../err &&
+		git update-ref -d refs/remotes/origin/zCASE &&
+		git config --unset core.ignoreCase &&
+
+		git config core.precomposeUnicode true &&
+		rev=$(git rev-parse refs/heads/master) &&
+		echo "$rev refs/remotes/origin/zlamé" >>.git/packed-refs &&
+		echo "$rev refs/remotes/origin/zlamé" >>.git/packed-refs &&
+		test_must_fail git filter-repo --path numbers 2>../err
+		test_i18ngrep "Cannot rewrite history on a character normalizing" ../err &&
+		git update-ref -d refs/remotes/origin/zlamé &&
+		git config --unset core.precomposeUnicode &&
+		cd ..
 	)
 '
 
@@ -1621,7 +1678,7 @@ test_expect_success 'handle funny characters' '
 
 		file_sha=$(git rev-parse :0:señor) &&
 		former_head_sha=$(git rev-parse HEAD) &&
-		git filter-repo --to-subdirectory-filter títulos &&
+		git filter-repo --replace-refs old-default --to-subdirectory-filter títulos &&
 
 		cat <<-EOF >expect &&
 		100644 $file_sha 0	"t\303\255tulos/se\303\261or"
@@ -1818,6 +1875,22 @@ test_expect_success 'degenerate merge with typechange' '
 	)
 '
 
+test_expect_success 'degenerate evil merge' '
+	test_create_repo degenerate_evil_merge &&
+	(
+		cd degenerate_evil_merge &&
+
+		cat $DATA/degenerate-evil-merge | git fast-import --quiet &&
+		git filter-repo --force --subdirectory-filter module-of-interest &&
+		test_path_is_missing module-of-interest &&
+		test_path_is_missing other-module &&
+		test_path_is_missing irrelevant &&
+		test_path_is_file file1 &&
+		test_path_is_file file2 &&
+		test_path_is_file file3
+	)
+'
+
 test_expect_success 'Filtering a blob to make it match previous version' '
 	test_create_repo remove_unique_bits_of_blob &&
 	(
@@ -1853,7 +1926,17 @@ test_expect_success 'tweaking just a tag' '
 	)
 '
 
-test_expect_success '--version' '
+test_lazy_prereq IN_FILTER_REPO_CLONE '
+	git -C ../../ rev-parse HEAD:git-filter-repo &&
+	grep @@LOCALEDIR@@ ../../../git-filter-repo &&
+	head -n 1 ../../../git-filter-repo | grep "/usr/bin/env python3$"
+'
+
+# Next test depends on git-filter-repo coming from the git-filter-repo
+# not having been modified by e.g. normal installation.  Skip the test
+# if we're in some kind of installation of filter-repo rather than in a
+# simple clone of the original repository.
+test_expect_success IN_FILTER_REPO_CLONE '--version' '
 	git filter-repo --version >actual &&
 	git hash-object ../../git-filter-repo | cut -c 1-12 >expect &&
 	test_cmp expect actual
@@ -1888,6 +1971,62 @@ test_expect_success 'empty author ident' '
 
 		git log --format=%an develop >actual &&
 		echo >expect &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'rewrite stash' '
+	test_create_repo rewrite_stash &&
+	(
+		cd rewrite_stash &&
+
+		git init &&
+		test_write_lines 1 2 3 4 5 6 7 8 9 10 >numbers &&
+		git add numbers &&
+		git commit -qm initial &&
+
+		echo 11 >>numbers &&
+		git stash push -m "add eleven" &&
+		echo foobar >>numbers &&
+		git stash push -m "add foobar" &&
+
+		git filter-repo --force --path-rename numbers:values &&
+
+		git stash list >output &&
+		test 2 -eq $(cat output | wc -l)
+	)
+'
+
+test_expect_success POSIXPERM 'failure to run cleanup' '
+	test_create_repo fail_to_cleanup &&
+	(
+		cd fail_to_cleanup &&
+
+		git init &&
+		test_write_lines 1 2 3 4 5 6 7 8 9 10 >numbers &&
+		git add numbers &&
+		git commit -qm initial &&
+
+		chmod u-w .git/logs &&
+		test_must_fail git filter-repo --force \
+		                       --path-rename numbers:values 2> ../err &&
+		chmod u+w .git/logs &&
+		grep fatal.*git.reflog.expire.*failed ../err
+	)
+'
+
+test_expect_success 'origin refs without origin remote does not die' '
+	test_create_repo origin_refs_with_origin_remote &&
+	(
+		cd origin_refs_with_origin_remote &&
+
+		test_commit numbers &&
+		git update-ref refs/remotes/origin/svnhead master &&
+
+		git filter-repo --force --path-rename numbers.t:values.t &&
+
+		git show svnhead:values.t >actual &&
+		echo numbers >expect &&
 		test_cmp expect actual
 	)
 '
